@@ -1,0 +1,9 @@
+# Dependencies & build output
+node_modules/
+client/dist/
+
+# Your notes, links, settings (incl. API key) — personal data, never committed.
+# Run `npm run seed` to generate demo content locally.
+data/
+
+*.log
