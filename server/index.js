@@ -373,13 +373,41 @@ app.post("/api/ai/ask", async (req, res) => {
   const history = Array.isArray(req.body?.history)
     ? req.body.history.filter((m) => m && (m.role === "user" || m.role === "assistant") && m.content).slice(-8)
     : [];
+  // Retrieval: TF-IDF similarity, plus direct title/tag matches the
+  // similarity engine misses (it stopwords conversational words).
   const vec = brain.vectorForDraft(question);
-  const hits = brain.similarTo(vec, { threshold: 0.02, limit: 8 });
+  let hits = brain.similarTo(vec, { threshold: 0.02, limit: 8 });
+  const hitIds = new Set(hits.map((h) => h.id));
+  const qWords = (question.toLowerCase().match(/[a-z0-9][a-z0-9-]+/g) || []).filter((w) => w.length >= 4);
+  for (const n of store.allNotes().values()) {
+    if (hits.length >= 10) break;
+    if (hitIds.has(n.id)) continue;
+    const hay = (n.title + " " + n.tags.join(" ")).toLowerCase();
+    if (qWords.some((w) => hay.includes(w))) {
+      hits.push({ id: n.id });
+      hitIds.add(n.id);
+    }
+  }
+  // Broad/meta questions ("what do I focus on?") match nothing textual —
+  // fall back to the most recent notes so Claude has something concrete.
+  if (hits.length === 0) {
+    hits = [...store.allNotes().values()]
+      .sort((a, b) => b.updated.localeCompare(a.updated))
+      .slice(0, 6)
+      .map((n) => ({ id: n.id }));
+  }
   const contextNotes = hits.map((h) => {
     const n = store.getNote(h.id);
     return { title: n.title, type: n.type, updated: n.updated, excerpt: snippet(n.content, 1500) };
   });
-  const { result, error } = await ai.askBrain(store.getSettings(), question, history, contextNotes);
+  // The master catalog: every note, one line each, so vault-wide questions
+  // can always be answered even when retrieval finds no excerpts.
+  const vaultIndex = [...store.allNotes().values()]
+    .sort((a, b) => b.updated.localeCompare(a.updated))
+    .slice(0, 200)
+    .map((n) => `- "${n.title}" (${n.type}${n.tags.length ? ", tags: " + n.tags.join("/") : ""}) — updated ${n.updated.slice(0, 10)}`)
+    .join("\n");
+  const { result, error } = await ai.askBrain(store.getSettings(), question, history, contextNotes, vaultIndex);
   if (error) return res.status(502).json({ error });
   res.json({ answer: result, sources: hits.map((h) => toListItem(store.getNote(h.id))) });
 });

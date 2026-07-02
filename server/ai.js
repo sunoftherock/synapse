@@ -163,19 +163,21 @@ export async function distillConcepts(settings, note, existingConceptTitles) {
  * Answer a question from the user's own notes. Returns markdown that cites
  * notes as [[wikilinks]] so the client can render them as clickable links.
  */
-export async function askBrain(settings, question, history, contextNotes) {
+export async function askBrain(settings, question, history, contextNotes, vaultIndex) {
   const anthropic = client(settings);
   if (!anthropic) return { error: "No API key configured." };
   const context = contextNotes.length
     ? contextNotes
         .map((n) => `<note title="${n.title}" type="${n.type}" updated="${n.updated.slice(0, 10)}">\n${n.excerpt}\n</note>`)
         .join("\n\n")
-    : "(no relevant notes found)";
+    : "(no notes matched this question textually)";
   const messages = [
     ...history.slice(-8).map((m) => ({ role: m.role, content: String(m.content).slice(0, 6000) })),
     {
       role: "user",
-      content: `${question}\n\n<relevant-notes>\n${context}\n</relevant-notes>`,
+      content:
+        `${question}\n\n<vault-index>\n${vaultIndex || "(empty)"}\n</vault-index>\n\n` +
+        `<relevant-notes>\n${context}\n</relevant-notes>`,
     },
   ];
   try {
@@ -186,11 +188,16 @@ export async function askBrain(settings, question, history, contextNotes) {
       system: sys(
         settings,
         "You are the synthesis layer of the user's personal knowledge base (their work notes, meetings, tickets, " +
-          "research, and concept pages). Answer their question from the provided notes. Cite a note as [[Exact Note " +
-          "Title]] every time you draw on it — these render as clickable links. Synthesize across notes rather than " +
-          "summarizing them one by one; surface connections and implications the user may not have seen. If the " +
-          "notes don't cover something, say so plainly rather than filling in from general knowledge — and clearly " +
-          "mark anything you add from outside the notes. Be concise and practical. Answer in markdown."
+          "research, and concept pages). Each question comes with two context blocks: <vault-index>, a one-line-per-" +
+          "note catalog of EVERYTHING in the knowledge base, and <relevant-notes>, full excerpts of the notes a " +
+          "keyword search matched. Answer from these. For broad questions about the vault as a whole (themes, what " +
+          "the user works on, what exists), reason from the index — never claim the knowledge base is empty or " +
+          "disconnected while the index has entries. Cite a note as [[Exact Note Title]] every time you draw on it — " +
+          "these render as clickable links; if an index entry looks relevant but has no excerpt, cite it and suggest " +
+          "asking about it specifically. Synthesize across notes rather than summarizing them one by one; surface " +
+          "connections and implications the user may not have seen. If the notes genuinely don't cover something, " +
+          "say so plainly — and clearly mark anything you add from outside the notes. Be concise and practical. " +
+          "Answer in markdown."
       ),
       messages,
     });
