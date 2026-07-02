@@ -10,6 +10,19 @@ export const MODELS = [
   { id: "claude-haiku-4-5", label: "Claude Haiku 4.5 — cheapest" },
 ];
 
+// Sticker prices per million tokens; cache reads bill at 0.1× input,
+// cache writes at 1.25× input (5-minute TTL).
+const PRICING = {
+  "claude-opus-4-8": { in: 5, out: 25 },
+  "claude-sonnet-5": { in: 3, out: 15 },
+  "claude-haiku-4-5": { in: 1, out: 5 },
+};
+
+export function costOf(model, u) {
+  const p = PRICING[model] || PRICING[DEFAULT_MODEL];
+  return (u.input * p.in + u.cacheWrite * p.in * 1.25 + u.cacheRead * p.in * 0.1 + u.output * p.out) / 1e6;
+}
+
 export function resolveKey(settings) {
   if (process.env.ANTHROPIC_API_KEY) return { key: process.env.ANTHROPIC_API_KEY, source: "env" };
   if (settings.anthropicApiKey) return { key: settings.anthropicApiKey, source: "saved" };
@@ -210,13 +223,18 @@ export async function askBrain(settings, question, history, vaultIndex, tools) {
     max_tokens: 8000,
     thinking: { type: "adaptive" },
     tools: ASK_TOOLS,
+    // Each loop turn re-sends the whole conversation; auto-caching makes the
+    // repeated prefix bill at ~0.1× instead of full input price.
+    cache_control: { type: "ephemeral" },
     system: sys(
       settings,
       "You are the reasoning layer of the user's personal knowledge base (their work notes, meetings, tickets, " +
         "research, and concept pages). Each question includes a <vault-index> — a one-line catalog of every note. " +
         "You have tools to search the vault and read full notes. Workflow: find candidate notes (index + search), " +
         "then READ every note you intend to rely on — typically 2-6 reads; index lines and snippets are not enough " +
-        "to judge relevance, and you must never present a conclusion based only on a title or snippet. Follow " +
+        "to judge relevance, and you must never present a conclusion based only on a title or snippet. When several " +
+        "notes look relevant, request them all at once with parallel read_note calls in the same turn — never one " +
+        "at a time — and batch a search together with reads when you already know one note you need. Follow " +
         "linkedNotes into connected notes when they bear on the question. Never tell the user a note 'might be " +
         "relevant' or suggest they check it themselves — read it yourself and incorporate what it actually says. " +
         "Cite a note as [[Exact Note Title]] every time you draw on it (these render as clickable links). " +
@@ -227,12 +245,18 @@ export async function askBrain(settings, question, history, vaultIndex, tools) {
         "disconnected while the index has entries."
     ),
   };
+  const usage = { input: 0, cacheWrite: 0, cacheRead: 0, output: 0, turns: 0 };
   try {
     let response;
     for (let turn = 0; turn < MAX_TURNS; turn++) {
       const params = { ...base, messages };
       if (turn === MAX_TURNS - 1) params.tool_choice = { type: "none" }; // out of budget — answer now
       response = await anthropic.messages.create(params);
+      usage.turns++;
+      usage.input += response.usage?.input_tokens || 0;
+      usage.cacheWrite += response.usage?.cache_creation_input_tokens || 0;
+      usage.cacheRead += response.usage?.cache_read_input_tokens || 0;
+      usage.output += response.usage?.output_tokens || 0;
       if (response.stop_reason === "refusal") throw new Error("Claude declined to answer this question.");
       if (response.stop_reason !== "tool_use") break;
 
@@ -256,7 +280,7 @@ export async function askBrain(settings, question, history, vaultIndex, tools) {
       .filter((b) => b.type === "text")
       .map((b) => b.text)
       .join("\n");
-    return { result: answer };
+    return { result: answer, usage: { ...usage, cost: costOf(base.model, usage) } };
   } catch (e) {
     return { error: friendlyError(e) };
   }

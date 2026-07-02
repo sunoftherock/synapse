@@ -1,5 +1,6 @@
 import type {
   ActionItem,
+  AskUsage,
   Bundle,
   DeepConnection,
   GraphData,
@@ -71,7 +72,7 @@ export const api = {
     req<{ created: NoteListItem[]; updated: NoteListItem[] }>(`/api/ai/distill/${id}`, { method: "POST" }),
 
   ask: (question: string, history: { role: string; content: string }[]) =>
-    req<{ answer: string; sources: NoteListItem[]; trace: string[] }>("/api/ai/ask", {
+    req<{ answer: string; sources: NoteListItem[]; trace: string[]; usage?: AskUsage }>("/api/ai/ask", {
       method: "POST",
       body: JSON.stringify({ question, history }),
     }),

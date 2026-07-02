@@ -25,3 +25,5 @@ Personal tool for Rocky (public repo): notes/meetings/Jira pastes stored as mark
 - Suggestion threshold default 0.07 (tuned against seed data: real connections score ~0.08–0.17, noise < 0.06). Graph uses threshold×1.3 for dashed edges, max 3 per note.
 - data/ is user data — never wipe it; deletes go through data/trash/.
 - WAL/SQLite was deliberately avoided (OneDrive sync folder); atomic tmp+rename writes with direct-write fallback.
+- **OneDrive touches server files after edits and triggers spurious `node --watch` restarts**, which kill in-flight ask requests (long agentic loops). Symptom: "connection closed" with no `[ask]` log line. For daily use prefer `npm run build && npm start` (no watcher); `PORT` env is respected. Verify AI changes against a stable instance: `$env:PORT="5179"; node server/index.js`.
+- Ask usage/cost is measured per question (`usage` in the response, `[ask]` server log line, pricing table in ai.js `costOf`). The loop uses top-level `cache_control: {type: "ephemeral"}` — each turn's prefix bills as cache reads; don't restructure messages in a way that breaks prefix stability (e.g., mutating earlier turns).

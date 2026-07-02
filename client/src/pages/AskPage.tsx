@@ -35,10 +35,13 @@ export default function AskPage() {
     setMessages((ms) => [...ms, { role: "user", content: question }]);
     setBusy(true);
     try {
-      const { answer, sources, trace } = await api.ask(question, history);
-      setMessages((ms) => [...ms, { role: "assistant", content: answer, sources, trace }]);
+      const { answer, sources, trace, usage } = await api.ask(question, history);
+      setMessages((ms) => [...ms, { role: "assistant", content: answer, sources, trace, usage }]);
     } catch (e: any) {
-      setError(e.message);
+      const msg = /failed to fetch|networkerror|load failed/i.test(e.message)
+        ? "Connection interrupted mid-answer (dev server restarted?). Your question is back in the box — hit Ask again; cached work makes the retry cheaper."
+        : e.message;
+      setError(msg);
       setMessages((ms) => ms.slice(0, -1)); // roll back the unanswered question
       setInput(question);
     } finally {
@@ -95,9 +98,19 @@ export default function AskPage() {
                   onToggle={() => {}}
                   onNavigate={(id) => navigate(`/note/${id}`)}
                 />
-                {m.trace && m.trace.length > 0 && (
+                {((m.trace && m.trace.length > 0) || m.usage) && (
                   <div className="ask-trace" title="What the agent did to answer this">
-                    🔍 {m.trace.join("  ·  ")}
+                    {m.trace && m.trace.length > 0 && <>🔍 {m.trace.join("  ·  ")}</>}
+                    {m.usage && (
+                      <span className="ask-cost">
+                        {m.trace?.length ? "  ·  " : ""}~${m.usage.cost.toFixed(2)} ({m.usage.turns} turn
+                        {m.usage.turns === 1 ? "" : "s"}
+                        {m.usage.cacheRead > 0
+                          ? `, ${Math.round((m.usage.cacheRead / Math.max(1, m.usage.input + m.usage.cacheWrite + m.usage.cacheRead)) * 100)}% cached`
+                          : ""}
+                        )
+                      </span>
+                    )}
                   </div>
                 )}
                 {m.sources && m.sources.length > 0 && (

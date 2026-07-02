@@ -56,11 +56,21 @@ export interface Settings {
   customInstructions: string;
 }
 
+export interface AskUsage {
+  input: number;
+  cacheWrite: number;
+  cacheRead: number;
+  output: number;
+  turns: number;
+  cost: number;
+}
+
 export interface AskMessage {
   role: "user" | "assistant";
   content: string;
   sources?: NoteListItem[];
   trace?: string[];
+  usage?: AskUsage;
 }
 
 export interface GraphNode {

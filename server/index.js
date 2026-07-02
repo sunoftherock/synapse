@@ -10,7 +10,7 @@ import { detectType, deriveTitle, extractActionItems, appendActionSection } from
 import { newId, nowIso, toListItem, wikiTargets, snippet, NOTE_TYPES } from "./notes.js";
 import { welcomeNote } from "./seed.js";
 
-const PORT = 5178;
+const PORT = Number(process.env.PORT) || 5178;
 const app = express();
 app.use(express.json({ limit: "10mb" }));
 
@@ -427,6 +427,10 @@ app.post("/api/ai/ask", async (req, res) => {
         const closest = searchVault(title).slice(0, 3).map((h) => store.getNote(h.id).title);
         return { error: `No note titled “${title}”.`, closestTitles: closest };
       }
+      if (readNotes.has(note.id)) {
+        // Don't re-send 2k tokens the conversation already contains.
+        return { title: note.title, alreadyRead: true, hint: "Full content was already provided earlier in this conversation — reuse it." };
+      }
       trace.push(`read “${note.title}”`);
       readNotes.set(note.id, note);
       const linkedNotes = [...store.linkedIds(note.id)]
@@ -444,9 +448,14 @@ app.post("/api/ai/ask", async (req, res) => {
     },
   };
 
-  const { result, error } = await ai.askBrain(store.getSettings(), question, history, vaultIndex, tools);
+  const { result, error, usage } = await ai.askBrain(store.getSettings(), question, history, vaultIndex, tools);
   if (error) return res.status(502).json({ error });
-  res.json({ answer: result, sources: [...readNotes.values()].map(toListItem), trace });
+  if (usage) {
+    console.log(
+      `[ask] ${usage.turns} turns · in ${usage.input} + cached ${usage.cacheRead} (write ${usage.cacheWrite}) · out ${usage.output} · ~$${usage.cost.toFixed(3)}`
+    );
+  }
+  res.json({ answer: result, sources: [...readNotes.values()].map(toListItem), trace, usage });
 });
 
 // ---------- Static (production build) ----------
