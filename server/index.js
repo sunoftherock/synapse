@@ -367,49 +367,86 @@ app.post("/api/ai/distill/:id", async (req, res) => {
 
 // ---------- AI ask: Q&A over the whole vault ----------
 
+/** Vault search used by the Ask agent's search tool: TF-IDF similarity plus
+ * direct title/tag matches (the similarity engine stopwords common words). */
+function searchVault(query) {
+  const vec = brain.vectorForDraft(query);
+  const hits = brain.similarTo(vec, { threshold: 0.02, limit: 10 });
+  const hitIds = new Set(hits.map((h) => h.id));
+  const qWords = (query.toLowerCase().match(/[a-z0-9][a-z0-9-]+/g) || []).filter((w) => w.length >= 4);
+  for (const n of store.allNotes().values()) {
+    if (hits.length >= 12) break;
+    if (hitIds.has(n.id)) continue;
+    const hay = (n.title + " " + n.tags.join(" ")).toLowerCase();
+    if (qWords.some((w) => hay.includes(w))) {
+      hits.push({ id: n.id, score: 0, sharedTerms: [] });
+      hitIds.add(n.id);
+    }
+  }
+  return hits;
+}
+
 app.post("/api/ai/ask", async (req, res) => {
   const question = String(req.body?.question || "").trim();
   if (!question) return res.status(400).json({ error: "Question is empty." });
   const history = Array.isArray(req.body?.history)
     ? req.body.history.filter((m) => m && (m.role === "user" || m.role === "assistant") && m.content).slice(-8)
     : [];
-  // Retrieval: TF-IDF similarity, plus direct title/tag matches the
-  // similarity engine misses (it stopwords conversational words).
-  const vec = brain.vectorForDraft(question);
-  let hits = brain.similarTo(vec, { threshold: 0.02, limit: 8 });
-  const hitIds = new Set(hits.map((h) => h.id));
-  const qWords = (question.toLowerCase().match(/[a-z0-9][a-z0-9-]+/g) || []).filter((w) => w.length >= 4);
-  for (const n of store.allNotes().values()) {
-    if (hits.length >= 10) break;
-    if (hitIds.has(n.id)) continue;
-    const hay = (n.title + " " + n.tags.join(" ")).toLowerCase();
-    if (qWords.some((w) => hay.includes(w))) {
-      hits.push({ id: n.id });
-      hitIds.add(n.id);
-    }
-  }
-  // Broad/meta questions ("what do I focus on?") match nothing textual —
-  // fall back to the most recent notes so Claude has something concrete.
-  if (hits.length === 0) {
-    hits = [...store.allNotes().values()]
-      .sort((a, b) => b.updated.localeCompare(a.updated))
-      .slice(0, 6)
-      .map((n) => ({ id: n.id }));
-  }
-  const contextNotes = hits.map((h) => {
-    const n = store.getNote(h.id);
-    return { title: n.title, type: n.type, updated: n.updated, excerpt: snippet(n.content, 1500) };
-  });
-  // The master catalog: every note, one line each, so vault-wide questions
-  // can always be answered even when retrieval finds no excerpts.
+
+  // The master catalog: every note, one line each, so the agent always has
+  // the full map of what exists before deciding what to search and read.
   const vaultIndex = [...store.allNotes().values()]
     .sort((a, b) => b.updated.localeCompare(a.updated))
     .slice(0, 200)
     .map((n) => `- "${n.title}" (${n.type}${n.tags.length ? ", tags: " + n.tags.join("/") : ""}) — updated ${n.updated.slice(0, 10)}`)
     .join("\n");
-  const { result, error } = await ai.askBrain(store.getSettings(), question, history, contextNotes, vaultIndex);
+
+  const readNotes = new Map(); // id → note, in read order
+  const trace = [];
+  const tools = {
+    search: (query) => {
+      if (!query.trim()) return { error: "Empty query." };
+      trace.push(`searched “${query}”`);
+      return searchVault(query).map((h) => {
+        const n = store.getNote(h.id);
+        return {
+          title: n.title,
+          type: n.type,
+          tags: n.tags,
+          updated: n.updated.slice(0, 10),
+          snippet: snippet(n.content, 300),
+          match: h.score ? Number(h.score.toFixed(2)) : "title",
+        };
+      });
+    },
+    read: (title) => {
+      const t = title.trim().toLowerCase();
+      const all = [...store.allNotes().values()];
+      const note = all.find((n) => n.title.trim().toLowerCase() === t) || all.find((n) => n.title.toLowerCase().includes(t));
+      if (!note) {
+        const closest = searchVault(title).slice(0, 3).map((h) => store.getNote(h.id).title);
+        return { error: `No note titled “${title}”.`, closestTitles: closest };
+      }
+      trace.push(`read “${note.title}”`);
+      readNotes.set(note.id, note);
+      const linkedNotes = [...store.linkedIds(note.id)]
+        .map(([id, kind]) => ({ title: store.getNote(id)?.title, kind }))
+        .filter((l) => l.title);
+      return {
+        title: note.title,
+        type: note.type,
+        tags: note.tags,
+        updated: note.updated.slice(0, 10),
+        content: note.content.slice(0, 8000),
+        linkedNotes,
+        concepts: brain.conceptsOf(note.id),
+      };
+    },
+  };
+
+  const { result, error } = await ai.askBrain(store.getSettings(), question, history, vaultIndex, tools);
   if (error) return res.status(502).json({ error });
-  res.json({ answer: result, sources: hits.map((h) => toListItem(store.getNote(h.id))) });
+  res.json({ answer: result, sources: [...readNotes.values()].map(toListItem), trace });
 });
 
 // ---------- Static (production build) ----------

@@ -35,8 +35,8 @@ export default function AskPage() {
     setMessages((ms) => [...ms, { role: "user", content: question }]);
     setBusy(true);
     try {
-      const { answer, sources } = await api.ask(question, history);
-      setMessages((ms) => [...ms, { role: "assistant", content: answer, sources }]);
+      const { answer, sources, trace } = await api.ask(question, history);
+      setMessages((ms) => [...ms, { role: "assistant", content: answer, sources, trace }]);
     } catch (e: any) {
       setError(e.message);
       setMessages((ms) => ms.slice(0, -1)); // roll back the unanswered question
@@ -95,6 +95,11 @@ export default function AskPage() {
                   onToggle={() => {}}
                   onNavigate={(id) => navigate(`/note/${id}`)}
                 />
+                {m.trace && m.trace.length > 0 && (
+                  <div className="ask-trace" title="What the agent did to answer this">
+                    🔍 {m.trace.join("  ·  ")}
+                  </div>
+                )}
                 {m.sources && m.sources.length > 0 && (
                   <div className="ask-sources">
                     <span className="muted small">consulted:</span>
@@ -109,7 +114,7 @@ export default function AskPage() {
               </div>
             )
           )}
-          {busy && <div className="ask-msg assistant muted">Reading your notes…</div>}
+          {busy && <div className="ask-msg assistant muted">Searching and reading your notes… (the agent reads full notes, so this can take a minute)</div>}
           {error && <div className="conn-error">{error}</div>}
           <div ref={bottomRef} />
         </div>

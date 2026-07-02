@@ -159,51 +159,104 @@ export async function distillConcepts(settings, note, existingConceptTitles) {
   }
 }
 
+const ASK_TOOLS = [
+  {
+    name: "search_notes",
+    description:
+      "Search the knowledge base for notes about a topic, system, person, ticket, or work item. Returns ranked " +
+      "matches with short snippets. Call this whenever the question touches something you haven't located yet, and " +
+      "again with reformulated or narrower queries as you learn more. Distinctive terms work best (system names, " +
+      "ticket keys like PROC-142, people, feature names).",
+    input_schema: {
+      type: "object",
+      properties: { query: { type: "string", description: "Search terms." } },
+      required: ["query"],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "read_note",
+    description:
+      "Read a note's FULL content, plus the titles of notes linked to it and its key concepts. Snippets and index " +
+      "lines are never enough to judge relevance or draw conclusions — always read a note before using it in your " +
+      "answer. Follow the linkedNotes trail by reading connected notes when they bear on the question.",
+    input_schema: {
+      type: "object",
+      properties: { title: { type: "string", description: "Exact note title, from the index or search results." } },
+      required: ["title"],
+      additionalProperties: false,
+    },
+  },
+];
+
 /**
- * Answer a question from the user's own notes. Returns markdown that cites
- * notes as [[wikilinks]] so the client can render them as clickable links.
+ * Agentic Q&A over the vault: Claude drives its own retrieval with search and
+ * read tools (callbacks supplied by the route), then synthesizes an answer in
+ * markdown that cites notes as [[wikilinks]].
  */
-export async function askBrain(settings, question, history, contextNotes, vaultIndex) {
+export async function askBrain(settings, question, history, vaultIndex, tools) {
   const anthropic = client(settings);
   if (!anthropic) return { error: "No API key configured." };
-  const context = contextNotes.length
-    ? contextNotes
-        .map((n) => `<note title="${n.title}" type="${n.type}" updated="${n.updated.slice(0, 10)}">\n${n.excerpt}\n</note>`)
-        .join("\n\n")
-    : "(no notes matched this question textually)";
+  const MAX_TURNS = 8;
   const messages = [
     ...history.slice(-8).map((m) => ({ role: m.role, content: String(m.content).slice(0, 6000) })),
     {
       role: "user",
-      content:
-        `${question}\n\n<vault-index>\n${vaultIndex || "(empty)"}\n</vault-index>\n\n` +
-        `<relevant-notes>\n${context}\n</relevant-notes>`,
+      content: `${question}\n\n<vault-index>\n${vaultIndex || "(empty)"}\n</vault-index>`,
     },
   ];
+  const base = {
+    model: settings.model || DEFAULT_MODEL,
+    max_tokens: 8000,
+    thinking: { type: "adaptive" },
+    tools: ASK_TOOLS,
+    system: sys(
+      settings,
+      "You are the reasoning layer of the user's personal knowledge base (their work notes, meetings, tickets, " +
+        "research, and concept pages). Each question includes a <vault-index> — a one-line catalog of every note. " +
+        "You have tools to search the vault and read full notes. Workflow: find candidate notes (index + search), " +
+        "then READ every note you intend to rely on — typically 2-6 reads; index lines and snippets are not enough " +
+        "to judge relevance, and you must never present a conclusion based only on a title or snippet. Follow " +
+        "linkedNotes into connected notes when they bear on the question. Never tell the user a note 'might be " +
+        "relevant' or suggest they check it themselves — read it yourself and incorporate what it actually says. " +
+        "Cite a note as [[Exact Note Title]] every time you draw on it (these render as clickable links). " +
+        "Synthesize: combine information across notes, reconcile conflicts (prefer newer notes), and surface " +
+        "connections and implications the user may not have seen. If after searching and reading the notes " +
+        "genuinely don't cover something, say so plainly — and clearly mark anything you add from outside the " +
+        "notes. Be concise and practical. Answer in markdown. Never claim the knowledge base is empty or " +
+        "disconnected while the index has entries."
+    ),
+  };
   try {
-    const response = await anthropic.messages.create({
-      model: settings.model || DEFAULT_MODEL,
-      max_tokens: 8000,
-      thinking: { type: "adaptive" },
-      system: sys(
-        settings,
-        "You are the synthesis layer of the user's personal knowledge base (their work notes, meetings, tickets, " +
-          "research, and concept pages). Each question comes with two context blocks: <vault-index>, a one-line-per-" +
-          "note catalog of EVERYTHING in the knowledge base, and <relevant-notes>, full excerpts of the notes a " +
-          "keyword search matched. Answer from these. For broad questions about the vault as a whole (themes, what " +
-          "the user works on, what exists), reason from the index — never claim the knowledge base is empty or " +
-          "disconnected while the index has entries. Cite a note as [[Exact Note Title]] every time you draw on it — " +
-          "these render as clickable links; if an index entry looks relevant but has no excerpt, cite it and suggest " +
-          "asking about it specifically. Synthesize across notes rather than summarizing them one by one; surface " +
-          "connections and implications the user may not have seen. If the notes genuinely don't cover something, " +
-          "say so plainly — and clearly mark anything you add from outside the notes. Be concise and practical. " +
-          "Answer in markdown."
-      ),
-      messages,
-    });
-    if (response.stop_reason === "refusal") throw new Error("Claude declined to answer this question.");
-    const block = response.content.find((b) => b.type === "text");
-    return { result: block ? block.text : "" };
+    let response;
+    for (let turn = 0; turn < MAX_TURNS; turn++) {
+      const params = { ...base, messages };
+      if (turn === MAX_TURNS - 1) params.tool_choice = { type: "none" }; // out of budget — answer now
+      response = await anthropic.messages.create(params);
+      if (response.stop_reason === "refusal") throw new Error("Claude declined to answer this question.");
+      if (response.stop_reason !== "tool_use") break;
+
+      messages.push({ role: "assistant", content: response.content });
+      const results = [];
+      for (const block of response.content) {
+        if (block.type !== "tool_use") continue;
+        let out;
+        try {
+          if (block.name === "search_notes") out = tools.search(String(block.input?.query || ""));
+          else if (block.name === "read_note") out = tools.read(String(block.input?.title || ""));
+          else out = { error: `Unknown tool ${block.name}` };
+        } catch (e) {
+          out = { error: e.message };
+        }
+        results.push({ type: "tool_result", tool_use_id: block.id, content: JSON.stringify(out) });
+      }
+      messages.push({ role: "user", content: results });
+    }
+    const answer = response.content
+      .filter((b) => b.type === "text")
+      .map((b) => b.text)
+      .join("\n");
+    return { result: answer };
   } catch (e) {
     return { error: friendlyError(e) };
   }

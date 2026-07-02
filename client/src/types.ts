@@ -60,6 +60,7 @@ export interface AskMessage {
   role: "user" | "assistant";
   content: string;
   sources?: NoteListItem[];
+  trace?: string[];
 }
 
 export interface GraphNode {

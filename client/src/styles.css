@@ -462,6 +462,14 @@ select.input { cursor: pointer; }
 }
 .ask-msg.assistant { align-self: stretch; background: var(--bg-panel); border: 1px solid var(--border); max-width: 100%; }
 .ask-msg.assistant .md { max-width: none; }
+.ask-trace {
+  font-size: 11.5px;
+  color: var(--text-faint);
+  border-top: 1px solid var(--border);
+  margin-top: 10px;
+  padding-top: 8px;
+  line-height: 1.8;
+}
 .ask-sources {
   display: flex;
   flex-wrap: wrap;
